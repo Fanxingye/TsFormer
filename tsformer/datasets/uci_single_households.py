@@ -60,6 +60,7 @@ def process_csv():
     df = df.sort_values([DATETIME]).reset_index(drop=True)
     df = df[[DATETIME, TARGET]]
     df[DATETIME] = pd.to_datetime(df[DATETIME], utc=False)
+    df["minute"] = df[DATETIME].apply(lambda x : x.hour)
 
     def parse(x):
         try:
@@ -73,6 +74,8 @@ def process_csv():
         method=config['fill_nan'],
         values_col=TARGET,
         datetime_col=DATETIME)
+    df = df[df["minute"] == 0]
+    df = df[[DATETIME, TARGET]]
     df.to_csv(
         os.path.join(config['data'],
                      'house_power/UCI_household_power_consumption_synth.csv'),
