@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES=0
 ###
  # @Author: jianzhnie
  # @Date: 2022-01-13 15:20:03
- # @LastEditTime: 2022-01-14 15:54:10
+ # @LastEditTime: 2022-01-17 16:01:55
  # @LastEditors: jianzhnie
  # @Description:
  #
@@ -13,7 +13,7 @@ python -u run.py \
       --root_path data/electricity/ \
       --data_path electricity.csv \
       --model_id ECL \
-      --model rnn \
+      --model attlstm \
       --data RNNData \
       --features MS \
       --seq_len 96 \
@@ -24,8 +24,8 @@ python -u run.py \
       --num_layers 1 \
       --output_size 96 \
       --train_epochs 20 \
-      --batch_size 32 \
-      --learning_rate 0.0001 \
+      --batch_size 256 \
+      --learning_rate 0.001 \
       --gpu 0 \
       --des 'Exp' \
       --itr 1

@@ -14,7 +14,7 @@ logger = logging.getLogger('log')
 
 NAME = 'uci'
 SAMPLES_PER_DAY = 96
-FREQ = '15T'
+FREQ = 'H'
 TARGET = 'Global_active_power'
 DATETIME = 'date'
 
@@ -112,7 +112,7 @@ def load_dataset(fill_nan='median', get_dates_dict=False):
     df = pd.read_csv(
         os.path.join(config['data'],
                      'house_power/UCI_household_power_consumption_synth.csv'))
-    df['datetime'] = pd.to_datetime(df['datetime'])
+    df[DATETIME] = pd.to_datetime(df[DATETIME])
     df = df.sort_values([DATETIME]).reset_index(drop=True)
     df = df[[DATETIME, TARGET]]
     df[DATETIME] = pd.to_datetime(df[DATETIME], utc=False)
@@ -333,3 +333,9 @@ def apply_detrend(df, train_len):
 if __name__ == '__main__':
     config = {'data': 'data', 'fill_nan': 'median'}
     process_csv()
+    df = load_dataset()
+    df.to_csv(
+        os.path.join(
+            config['data'],
+            'house_power/UCI_household_power_consumption_synth_hour.csv'),
+        index=False)

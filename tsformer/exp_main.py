@@ -3,15 +3,18 @@ import time
 import warnings
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch import optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from tsformer.datasets.data_factory import data_provider
 from tsformer.exp_basic import Exp_Basic
-from tsformer.models.rnn_model import GRU, LSTM, RNN
+from tsformer.models.rnn_model import GRU, LSTM, RNN, AttentionalLSTM
+from tsformer.models.transformer import Transformer
 from tsformer.utils.metrics import metric
-from tsformer.utils.tools import EarlyStopping, adjust_learning_rate, visual
+from tsformer.utils.tools import EarlyStopping, visual
 
 warnings.filterwarnings('ignore')
 
@@ -22,23 +25,47 @@ class Exp_Main(Exp_Basic):
         super(Exp_Main, self).__init__(args)
 
     def _build_model(self):
-        model_dict = {
-            'rnn': RNN,
-            'gru': GRU,
-            'lstm': LSTM,
-        }
 
         input_size = self.args.input_size
         hidden_size = self.args.hidden_size
         num_layers = self.args.num_layers
         output_size = self.args.output_size
 
-        model = model_dict[self.args.model]
-        model = model(input_size, hidden_size, num_layers, output_size)
+        if self.args.model == 'rnn':
+            model = RNN(input_size, hidden_size, num_layers, output_size)
+        elif self.args.model == 'lstm':
+            model = LSTM(input_size, hidden_size, num_layers, output_size)
+        elif self.args.model == 'gru':
+            model = GRU(input_size, hidden_size, num_layers, output_size)
+        elif self.args.model == 'attlstm':
+            model = AttentionalLSTM(
+                input_size=input_size,
+                qkv=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                output_size=output_size)
+
+        elif self.args.model == 'transformer':
+
+            model = Transformer(
+                input_size=1,
+                hidden_dim=128,
+                output_size=96,
+                dim_feedforward=512,
+                num_head=4,
+                num_layers=4,
+                dropout=0.1,
+            )
 
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
+
+    def _get_lr_scheduler(self, epochs):
+        optimizer = self._select_optimizer()
+        scheduler = CosineAnnealingLR(
+            optimizer, T_max=epochs, eta_min=0, last_epoch=-1)
+        return scheduler
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag)
@@ -60,7 +87,6 @@ class Exp_Main(Exp_Basic):
             for i, (batch_x, batch_y) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         outputs = self.model(batch_x)
@@ -84,7 +110,7 @@ class Exp_Main(Exp_Basic):
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
 
-        path = os.path.join(self.args.checkpoints, setting)
+        path = os.path.join(self.args.results_dir, 'checkpoints', setting)
         if not os.path.exists(path):
             os.makedirs(path)
 
@@ -96,6 +122,7 @@ class Exp_Main(Exp_Basic):
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
+        lr_scheduler = self._get_lr_scheduler(self.args.train_epochs)
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -151,18 +178,21 @@ class Exp_Main(Exp_Basic):
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
 
+            lr = lr_scheduler.get_last_lr()
+
             print(
-                'Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}'
-                .format(epoch + 1, train_steps, train_loss, vali_loss,
+                'Epoch: {0}, Lr:{1} |  Steps: {2} | Train Loss: {3:.7f} Vali Loss: {4:.7f} Test Loss: {5:.7f}'
+                .format(epoch + 1, lr, train_steps, train_loss, vali_loss,
                         test_loss))
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print('Early stopping')
                 break
 
-            adjust_learning_rate(model_optim, epoch + 1, self.args)
+            # adjust_learning_rate(model_optim, epoch + 1, self.args)
+            lr_scheduler.step()
 
-        best_model_path = path + '/' + 'checkpoint.pth'
+        best_model_path = os.path.join(path, 'checkpoint.pth')
         self.model.load_state_dict(torch.load(best_model_path))
 
         return self.model
@@ -173,12 +203,13 @@ class Exp_Main(Exp_Basic):
             print('loading model')
             self.model.load_state_dict(
                 torch.load(
-                    os.path.join('./checkpoints/' + setting,
+                    os.path.join(self.args.results_dir, 'checkpoints', setting,
                                  'checkpoint.pth')))
 
         preds = []
         trues = []
-        folder_path = './test_results/' + setting + '/'
+        folder_path = os.path.join(self.args.results_dir, 'test_results',
+                                   setting)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
@@ -187,13 +218,6 @@ class Exp_Main(Exp_Basic):
             for i, (batch_x, batch_y) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
-
-                # decoder input
-                dec_inp = torch.zeros_like(
-                    batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat(
-                    [batch_y[:, :self.args.label_len, :], dec_inp],
-                    dim=1).float().to(self.device)
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
@@ -219,42 +243,37 @@ class Exp_Main(Exp_Basic):
                                         axis=0)
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]),
                                         axis=0)
-                    visual(gt, pd, os.path.join(folder_path, str(i) + '.pdf'))
+                    visual(gt, pd, os.path.join(folder_path, str(i) + '.png'))
 
+        # result save
         preds = np.array(preds)
         trues = np.array(trues)
         print('test shape:', preds.shape, trues.shape)
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
         trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
-
-        # result save
-        folder_path = './results/' + setting + '/'
+        folder_path = os.path.join(self.args.results_dir, 'results', setting)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
-        print('mse:{}, mae:{}'.format(mse, mae))
-        f = open('result.txt', 'a')
-        f.write(setting + '  \n')
-        f.write('mse:{}, mae:{}'.format(mse, mae))
-        f.write('\n')
-        f.write('\n')
-        f.close()
-
-        np.save(folder_path + 'metrics.npy',
-                np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path + 'pred.npy', preds)
-        np.save(folder_path + 'true.npy', trues)
-
-        return
+        print('mse:{}, mae:{},rmse:{}, mape:{}, mspe:{}'.format(
+            mae, mse, rmse, mape, mspe))
+        test_result_file = os.path.join(folder_path, 'result.txt')
+        with open(test_result_file, 'w+') as f:
+            f.write(setting + '  \n')
+            f.write('mse:{}, mae:{}, rmse:{}, mape:{}, mspe{}'.format(
+                mae, mse, rmse, mape, mspe))
+            f.write('\n')
+            f.write('\n')
+            f.close()
 
     def predict(self, setting, load=False):
         pred_data, pred_loader = self._get_data(flag='pred')
 
         if load:
-            path = os.path.join(self.args.checkpoints, setting)
-            best_model_path = path + '/' + 'checkpoint.pth'
+            path = os.path.join(self.args.results_dir, 'checkpoints', setting)
+            best_model_path = os.path.join(path, 'checkpoint.pth')
             self.model.load_state_dict(torch.load(best_model_path))
 
         preds = []
@@ -264,13 +283,6 @@ class Exp_Main(Exp_Basic):
             for i, (batch_x, batch_y) in enumerate(pred_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
-                # decoder input
-                dec_inp = torch.zeros_like(
-                    batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat(
-                    [batch_y[:, :self.args.label_len, :], dec_inp],
-                    dim=1).float().to(self.device)
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         outputs = self.model(batch_x)
@@ -281,12 +293,12 @@ class Exp_Main(Exp_Basic):
 
         preds = np.array(preds)
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-
+        df = pd.DataFrame(preds)
         # result save
-        folder_path = './results/' + setting + '/'
+        folder_path = os.path.join(self.args.results_dir + setting)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        np.save(folder_path + 'real_prediction.npy', preds)
+        df.to_csv(folder_path + 'real_prediction.csv', index=False)
 
         return
